@@ -1,0 +1,14 @@
+device FixtureDevice {
+    default-byte-order: LE,
+    register-address-type: u8,
+
+    register configuration {
+        address: 0x01,
+        access: RW,
+        fields: fieldset Configuration {
+            size-bytes: 1,
+            field enabled 0 RW -> bool,
+            field mode 2:1 RW -> uint,
+        },
+    },
+}

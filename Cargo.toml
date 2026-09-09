@@ -1,0 +1,15 @@
+[package]
+name = "device-driver-pregen-check"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[[test]]
+name = "workflow"
+path = "tests/workflow.rs"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yml = "0.0.13"
+tempfile = "3"

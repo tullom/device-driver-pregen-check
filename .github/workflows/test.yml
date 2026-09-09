@@ -1,0 +1,60 @@
+name: Test pregen workflow
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - name: Check workflows
+        run: '"$(go env GOPATH)/bin/actionlint"'
+
+  behavior:
+    name: Test shell behavior
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: '1.94.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install Rust and rustfmt
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: '1.94.0'
+          components: rustfmt
+      - name: Install device-driver v2 compiler
+        uses: baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0
+        with:
+          crate: device-driver-cli
+          version: '=2.1.0'
+          locked: true
+          cache-key: rust-1.94.0
+      - name: Run behavior tests
+        run: cargo test --locked
+
+  fixture:
+    name: Test reusable workflow call
+    uses: ./.github/workflows/pregen-check.yml
+    with:
+      source: tests/fixtures/device.ddsl
+      generated-file: tests/fixtures/device.rs
