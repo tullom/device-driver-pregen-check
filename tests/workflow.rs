@@ -11,23 +11,15 @@ use serde_yml::Value;
 use tempfile::TempDir;
 
 #[derive(Debug, Deserialize)]
-struct Workflow {
-    #[serde(rename = "on")]
-    trigger: Trigger,
-    permissions: BTreeMap<String, String>,
-    #[serde(default)]
-    concurrency: Option<Value>,
-    jobs: BTreeMap<String, Job>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Trigger {
-    workflow_call: WorkflowCall,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkflowCall {
+struct Action {
     inputs: BTreeMap<String, Input>,
+    runs: ActionRuns,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionRuns {
+    using: String,
+    steps: Vec<Step>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,23 +28,16 @@ struct Input {
     default: Option<Value>,
     #[serde(default)]
     required: Option<bool>,
-    #[serde(default, rename = "type")]
-    kind: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Job {
-    #[serde(default)]
-    concurrency: Option<Value>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    steps: Vec<Step>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Step {
     #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
+    shell: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
     #[serde(default)]
     run: Option<String>,
     #[serde(default)]
@@ -65,12 +50,11 @@ fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn workflow() -> &'static Workflow {
-    static WORKFLOW: OnceLock<Workflow> = OnceLock::new();
-    WORKFLOW.get_or_init(|| {
-        let contents = fs::read_to_string(repository_root().join(".github/workflows/pregen-check.yml"))
-            .expect("read reusable workflow");
-        serde_yml::from_str(&contents).expect("parse reusable workflow")
+fn action() -> &'static Action {
+    static ACTION: OnceLock<Action> = OnceLock::new();
+    ACTION.get_or_init(|| {
+        let contents = fs::read_to_string(repository_root().join("action.yml")).expect("read composite action");
+        serde_yml::from_str(&contents).expect("parse composite action")
     })
 }
 
@@ -92,7 +76,7 @@ fn bash_path() -> OsString {
 }
 
 fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> RunResult {
-    let inputs = &workflow().trigger.workflow_call.inputs;
+    let inputs = &action().inputs;
     let rust_toolchain = inputs["rust-toolchain"]
         .default
         .as_ref()
@@ -115,7 +99,7 @@ fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> Run
         .env("GENERATED_FILE", "tests/fixtures/device.rs")
         .envs(overrides.iter().copied())
         .output()
-        .expect("run workflow script with Bash");
+        .expect("run action script with Bash");
 
     RunResult {
         status: output.status,
@@ -128,13 +112,14 @@ fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> Run
 }
 
 fn run_step(id: &str, workspace: &Path, overrides: &[(&str, &str)]) -> RunResult {
-    let step = workflow().jobs["check"]
+    let step = action()
+        .runs
         .steps
         .iter()
         .find(|step| step.id.as_deref() == Some(id))
-        .unwrap_or_else(|| panic!("workflow step {id:?}"));
+        .unwrap_or_else(|| panic!("action step {id:?}"));
     run_script(
-        step.run.as_deref().expect("workflow step has a run script"),
+        step.run.as_deref().expect("action step has a run script"),
         workspace,
         overrides,
     )
@@ -199,9 +184,16 @@ fn run_check(workspace: &Path, overrides: &[(&str, &str)]) -> RunResult {
 }
 
 #[test]
-fn reusable_workflow_has_pinned_actions_and_a_read_only_contract() {
-    let workflow = workflow();
-    let inputs = &workflow.trigger.workflow_call.inputs;
+fn composite_action_has_pinned_dependencies_and_expected_inputs() {
+    let action = action();
+    let inputs = &action.inputs;
+    assert_eq!(action.runs.using, "composite");
+    assert_eq!(inputs.len(), 4);
+    assert_eq!(inputs["source"].required, Some(true));
+    assert_eq!(
+        inputs["generated-file"].default.as_ref().and_then(Value::as_str),
+        Some("src/device.rs")
+    );
     assert_eq!(
         inputs["cli-version"].default.as_ref().and_then(Value::as_str),
         Some("2.1.0")
@@ -210,17 +202,8 @@ fn reusable_workflow_has_pinned_actions_and_a_read_only_contract() {
         inputs["rust-toolchain"].default.as_ref().and_then(Value::as_str),
         Some("1.94.0")
     );
-    assert_eq!(inputs["source"].required, Some(true));
-    assert_eq!(inputs["submodules"].kind.as_deref(), Some("boolean"));
-    assert_eq!(
-        workflow.permissions,
-        BTreeMap::from([("contents".to_owned(), "read".to_owned())])
-    );
-    assert!(workflow.concurrency.is_none());
 
-    let job = &workflow.jobs["check"];
-    assert!(job.concurrency.is_none());
-    for step in job.steps.iter().filter(|step| step.uses.is_some()) {
+    for step in action.runs.steps.iter().filter(|step| step.uses.is_some()) {
         let reference = step
             .uses
             .as_deref()
@@ -238,15 +221,63 @@ fn reusable_workflow_has_pinned_actions_and_a_read_only_contract() {
             step.uses
         );
     }
+}
 
-    let install = job
-        .steps
+#[test]
+fn composite_action_configures_its_steps_without_checkout() {
+    let action = action();
+    assert!(!action.inputs.contains_key("submodules"));
+    let steps = &action.runs.steps;
+    for step in steps {
+        assert_eq!(step.env["RUSTUP_TOOLCHAIN"], "${{ inputs.rust-toolchain }}");
+        if step.run.is_some() {
+            assert_eq!(step.shell.as_deref(), Some("bash"));
+        }
+        assert!(
+            step.uses
+                .as_deref()
+                .is_none_or(|uses| !uses.starts_with("actions/checkout@")),
+            "checkout belongs to the calling job"
+        );
+    }
+
+    let validate = steps
+        .iter()
+        .find(|step| step.id.as_deref() == Some("validate"))
+        .expect("version validation step");
+    assert_eq!(validate.env["CLI_VERSION"], "${{ inputs.cli-version }}");
+
+    let rust_setup = steps
+        .iter()
+        .find(|step| {
+            step.uses
+                .as_deref()
+                .is_some_and(|uses| uses.starts_with("dtolnay/rust-toolchain@"))
+        })
+        .expect("Rust and rustfmt install step");
+    assert_eq!(
+        rust_setup.with["toolchain"].as_str(),
+        Some("${{ inputs.rust-toolchain }}")
+    );
+    assert_eq!(rust_setup.with["components"].as_str(), Some("rustfmt"));
+
+    let install = steps
         .iter()
         .find(|step| step.with.get("crate").and_then(Value::as_str) == Some("device-driver-cli"))
         .expect("device-driver-cli install step");
     assert_eq!(install.with["locked"].as_bool(), Some(true));
     assert_eq!(install.with["version"].as_str(), Some("^${{ inputs.cli-version }}"));
-    assert_eq!(job.env["RUSTUP_TOOLCHAIN"], "${{ inputs.rust-toolchain }}");
+    assert_eq!(
+        install.with["cache-key"].as_str(),
+        Some("rust-${{ inputs.rust-toolchain }}")
+    );
+
+    let check = steps
+        .iter()
+        .find(|step| step.id.as_deref() == Some("check"))
+        .expect("generation and comparison step");
+    assert_eq!(check.env["SOURCE_FILE"], "${{ inputs.source }}");
+    assert_eq!(check.env["GENERATED_FILE"], "${{ inputs.generated-file }}");
 }
 
 #[test]

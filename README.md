@@ -1,16 +1,14 @@
 # Device-driver Pregen Check
 
-A reusable GitHub Actions workflow for checking committed Rust generated from
-device-driver v2 DDSL. It regenerates into a temporary file, formats the output,
-and fails with a unified diff when the committed file is out of date. The check
-never overwrites the committed file or creates a commit.
+A GitHub Action that fails your build when the Rust file you committed no longer
+matches your [device-driver](https://device-driver.com/) v2 DDSL source.
 
-## Usage
+It regenerates the driver into a temporary file, formats it, and diffs it against
+your committed file. Nothing is ever rewritten or committed for you.
 
-After publishing this repository, replace `OWNER` and the example release tag
-below with your repository owner and a published reference. Prefer a full commit
-SHA for immutable consumer pinning. No remote repository or release is created
-by this local scaffold.
+## Quick start
+
+Add `.github/workflows/pregen.yml` to your driver repository:
 
 ```yaml
 name: Device-driver pregen check
@@ -29,60 +27,77 @@ concurrency:
 
 jobs:
   pregen:
-    uses: OWNER/device-driver-pregen-check/.github/workflows/pregen-check.yml@v1.0.0
-    with:
-      source: device.ddsl
-      generated-file: src/device.rs
-      cli-version: '2.1.0'
-      rust-toolchain: '1.94.0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: tullom/device-driver-pregen-check@v1
+        with:
+          source: device.ddsl
+          generated-file: src/device.rs
 ```
 
-Call this at job level, not under `steps`. The reusable workflow owns the runner
-and steps and checks out the **calling repository**. Keep triggers and concurrency
-in the caller; the reusable workflow does not define a competing concurrency group.
-Neither an `action.yml` file nor GitHub's "Template repository" setting is needed.
+Point `source` at your DDSL file and `generated-file` at the Rust file you
+commit. Everything else has a default. For immutable pinning, replace `@v1` with
+a full commit SHA.
+
+## How it works
+
+1. Installs Rust with `rustfmt`, then `device-driver-cli` (cached between runs).
+2. Runs `ddc build` into a temporary file at your repository root.
+3. Formats it with `rustfmt --edition 2024 --config newline_style=Unix`.
+4. Diffs it against `generated-file`.
+
+The temporary file is always cleaned up. There are no outputs; the step simply
+passes or fails.
 
 ## Inputs
 
-| Input | Type | Default | Meaning |
+| Input | Required | Default | Description |
 | --- | --- | --- | --- |
-| `source` | string | required | Existing DDSL source, relative to the caller's repository root |
-| `generated-file` | string | `src/device.rs` | Existing committed Rust file to compare against |
-| `cli-version` | string | `2.1.0` | Minimum stable v2 CLI version, at least `2.1.0` |
-| `rust-toolchain` | string | `1.94.0` | Exact stable Rust release, at least 1.94.0 and the selected CLI's MSRV |
-| `submodules` | boolean | `false` | Check out the caller's submodules |
+| `source` | yes | — | Your DDSL file, relative to the repository root |
+| `generated-file` | no | `src/device.rs` | The committed Rust file to check |
+| `cli-version` | no | `2.1.0` | Oldest `device-driver-cli` v2 release you accept |
+| `rust-toolchain` | no | `1.94.0` | Exact Rust release to use |
 
-Paths use forward slashes. Spaces and shell metacharacters are treated literally.
-Absolute paths, directories, and paths resolving outside the checkout are rejected.
-Generation runs on an Ubuntu GitHub-hosted runner. The CLI installation is cached
-and uses Cargo's caret requirement with `--locked`. For example, `cli-version:
-'2.1.0'` selects the newest available release from `>=2.1.0, <3.0.0`; the cache
-also includes the toolchain. Version ranges, prereleases, and `latest` are rejected
-as inputs.
+**Paths** are relative to your repository root and use forward slashes. Spaces
+are fine. Absolute paths, backslashes, directories, and anything outside the
+checkout are rejected.
 
-The root `rustfmt.toml` or `.rustfmt.toml` controls formatting. Directory-specific
-formatting configurations next to the expected file are not used. Both generation
-and the final formatting pass run from the repository root, with the temporary
-output also at that root. The final pass uses edition 2024 and LF newlines.
+**`cli-version` is a floor, not a pin.** The default installs the newest
+[`device-driver-cli`](https://crates.io/crates/device-driver-cli) in
+`>=2.1.0, <3.0.0`. Ranges, prereleases, and `latest` are rejected, so raise the
+floor with an exact release like `2.3.1`. `rust-toolchain` must be an exact
+stable release, at least 1.94.0 and new enough for the CLI.
 
-Comparison is exact: whitespace and line-ending differences fail too. For
-consistent checkouts, include this rule in the caller's `.gitattributes`:
+**Formatting** uses the `rustfmt.toml` at your repository root; config files in
+other directories are ignored. Edition 2024 and LF newlines are always forced.
+
+The diff is exact, so line endings matter. Add this to your `.gitattributes`:
 
 ```gitattributes
 *.rs text eol=lf
 ```
 
-Ordinary use requires only `contents: read`, with no additional secrets. The caller
-must allow this workflow and its pinned actions in its Actions settings. A public
-workflow repository is simplest for public consumers. Private workflow repositories
-need appropriate access settings; `submodules: true` does not grant credentials for
-otherwise inaccessible private submodules.
+## Requirements
 
-## Regenerate Locally
+- An Ubuntu GitHub-hosted runner.
+- A checkout step first; the action doesn't check out anything itself.
+- `permissions: contents: read`. No secrets.
+- `submodules: true` on your checkout if the DDSL lives in a submodule.
 
-Use the same CLI and Rust versions as CI. Run from the caller's repository root;
-format the temporary root-level file before moving it to the expected location.
-Adjust the source and output names to match your workflow inputs.
+If your organization restricts actions, allow this one plus
+`dtolnay/rust-toolchain` and `baptiste0928/cargo-install`.
+
+## Fixing a failure
+
+The log ends with a diff: `-` lines are yours, `+` lines are what the compiler
+produces now. Regenerate with the same versions CI uses, then commit.
+
+Run these from your repository root, and format the temporary file before moving
+it, so the same `rustfmt.toml` applies. Adjust the names to match your inputs.
 
 Bash:
 
@@ -111,54 +126,40 @@ if ($LASTEXITCODE -ne 0) { throw 'Formatting failed' }
 Move-Item -LiteralPath ci_gen.rs -Destination src/device.rs -Force
 ```
 
-The package is named `device-driver-cli`, but its v2 executable is `ddc`.
-Device names are declared inside DDSL. The v1 YAML input and the old
-`--manifest` / `--device-name` command are not supported by this workflow.
-Migrating an existing v1 driver also requires compatible runtime and generated-code
-changes; switching its workflow alone is not a runtime migration.
+The crate is named `device-driver-cli`, but the executable is `ddc`.
 
-## Development
+If the diff looks like every line changed, your checkout has CRLF endings. Add
+the `.gitattributes` rule above, then run `git add --renormalize .`.
 
-The local toolchain is pinned in `rust-toolchain.toml`. Install the compiler into
-the ignored `.tools` directory and run the tests from this repository's root:
+## Common errors
 
-```text
-cargo +1.94.0 install device-driver-cli --version '=2.1.0' --locked --root .tools
-cargo test --locked
+| Message | Cause |
+| --- | --- |
+| `source must be a repository-relative path with forward slashes.` | A leading `/`, a drive letter, or `\` in the path. |
+| `source does not exist.` | Not in the checkout. Check the path, or enable submodules. |
+| `generated-file must be a regular file inside the checkout.` | It's a directory, or it points outside the workspace. |
+| `cli-version must be a stable v2 release, such as 2.1.0.` | Ranges, prereleases, and `latest` aren't accepted. |
+| `rust-toolchain must be an exact stable release, such as 1.94.0.` | `stable` and `nightly` aren't accepted. |
+| No matching package while installing | `cli-version` is newer than any published v2 release. |
+
+## Multiple devices
+
+Add a step per device. The toolchain and compiler are installed once and reused:
+
+```yaml
+      - uses: tullom/device-driver-pregen-check@v1
+        with:
+          source: drivers/accel/accel.ddsl
+          generated-file: drivers/accel/src/device.rs
+      - uses: tullom/device-driver-pregen-check@v1
+        with:
+          source: drivers/gyro/gyro.ddsl
+          generated-file: drivers/gyro/src/device.rs
 ```
 
-Tests need Rust 1.94.0 with rustfmt and Bash with GNU coreutils. On Windows they use
-Git Bash from the standard Git installation; set `BASH_PATH` for a custom location.
-Tests prefer `.tools/bin/ddc` over any compiler already on `PATH`. The Rust test
-dependencies are development-only; consumers need no Cargo project.
+## Coming from v1
 
-The test harness parses the workflow YAML and executes its actual version-validation
-and generation scripts in disposable checkouts. It covers matching and stale output,
-changed and invalid DDSL, missing files, unsafe paths, shell metacharacters,
-nondefault formatting, formatter errors, exact line endings, cleanup, and preservation
-of the expected file. Baselines are not regenerated by the tests.
-
-Workflow CI has three jobs: actionlint, these behavior tests, and a same-commit call
-to the reusable workflow using `tests/fixtures/device.ddsl` and its Rust baseline.
-Lint locally with actionlint 1.7.7; CI installs it with:
-
-```bash
-go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
-"$(go env GOPATH)/bin/actionlint"
-```
-
-To update the fixture intentionally, use the regeneration procedure above with
-`tests/fixtures/device.ddsl` as the source and `tests/fixtures/device.rs` as the
-destination, then rerun the tests. Review generated changes whenever upgrading
-either the compiler or the formatter, even for patch releases.
-
-## Publication
-
-1. Create a public GitHub repository under the desired owner and configure its remote.
-2. Review and commit the scaffold, then push it and confirm all three CI jobs pass.
-3. Test a cross-repository caller, including a stale-output failure.
-4. Publish an initial workflow release such as `v1.0.0`; optionally maintain a `v1`
-   convenience tag while recommending full commit SHAs to consumers.
-
-The workflow's release version is independent of the device-driver version it
-installs: workflow `v1.0.0` can use device-driver `2.1.0`.
+This action supports v2 DDSL only. The v1 YAML input and the
+`--manifest` / `--device-name` flags aren't supported, and device names now live
+inside the DDSL. Swapping the CI check isn't a migration on its own: a v1 driver
+also needs runtime and generated-code changes.

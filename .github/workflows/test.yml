@@ -1,4 +1,4 @@
-name: Test pregen workflow
+name: Test pregen check
 
 on:
   push:
@@ -52,9 +52,15 @@ jobs:
       - name: Run behavior tests
         run: cargo test --locked
 
-  fixture:
-    name: Test reusable workflow call
-    uses: ./.github/workflows/pregen-check.yml
-    with:
-      source: tests/fixtures/device.ddsl
-      generated-file: tests/fixtures/device.rs
+  composite:
+    name: Test composite action
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./
+        with:
+          source: tests/fixtures/device.ddsl
+          generated-file: tests/fixtures/device.rs
