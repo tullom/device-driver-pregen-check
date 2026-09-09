@@ -94,6 +94,7 @@ jobs:
             local input_path="$1"
             local label="$2"
             local resolved_path
+            # shellcheck disable=SC1003 # *'\'* is a literal-backslash glob, not an escaped quote.
             if [[ -z "$input_path" || "$input_path" == /* || "$input_path" =~ ^[A-Za-z]: || "$input_path" == *'\'* ]]; then
               printf '::error::%s must be a repository-relative path with forward slashes.\n' "$label" >&2
               return 1
