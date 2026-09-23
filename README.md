@@ -43,6 +43,19 @@ Point `source` at your DDSL file and `generated-file` at the Rust file you
 commit. Everything else has a default. For immutable pinning, replace `@v1` with
 a full commit SHA.
 
+To generate `defmt` implementations gated by a Cargo feature, set
+`rust-defmt-feature` to that feature's name:
+
+```yaml
+      - uses: tullom/device-driver-pregen-check@v1
+        with:
+          source: device.ddsl
+          generated-file: src/device.rs
+          rust-defmt-feature: defmt
+```
+
+Omit it or leave it empty to generate without `defmt` implementations.
+
 ## How it works
 
 1. Installs Rust with `rustfmt`, then `device-driver-cli` (cached between runs).
@@ -61,6 +74,7 @@ passes or fails.
 | `generated-file` | no | `src/device.rs` | The committed Rust file to check |
 | `cli-version` | no | `2.1.0` | Oldest `device-driver-cli` v2 release you accept |
 | `rust-toolchain` | no | `1.94.0` | Exact Rust release to use |
+| `rust-defmt-feature` | no | `''` | Cargo feature gating generated `defmt` implementations; empty disables them |
 
 **Paths** are relative to your repository root and use forward slashes. Spaces
 are fine. Absolute paths, backslashes, directories, and anything outside the
@@ -127,6 +141,9 @@ Move-Item -LiteralPath ci_gen.rs -Destination src/device.rs -Force
 ```
 
 The crate is named `device-driver-cli`, but the executable is `ddc`.
+
+When `rust-defmt-feature` is set, add the same feature after `rust` in either
+`ddc build` command above, for example `rust --rust-defmt-feature=defmt`.
 
 If the diff looks like every line changed, your checkout has CRLF endings. Add
 the `.gitattributes` rule above, then run `git add --renormalize .`.

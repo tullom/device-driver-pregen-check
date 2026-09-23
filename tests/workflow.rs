@@ -83,6 +83,11 @@ fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> Run
         .and_then(Value::as_str)
         .unwrap();
     let cli_version = inputs["cli-version"].default.as_ref().and_then(Value::as_str).unwrap();
+    let rust_defmt_feature = inputs["rust-defmt-feature"]
+        .default
+        .as_ref()
+        .and_then(Value::as_str)
+        .unwrap();
     let mut paths = vec![repository_root().join(".tools/bin")];
     if let Some(inherited_path) = env::var_os("PATH") {
         paths.extend(env::split_paths(&inherited_path));
@@ -97,6 +102,7 @@ fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> Run
         .env("GITHUB_WORKSPACE", workspace.to_string_lossy().replace('\\', "/"))
         .env("SOURCE_FILE", "tests/fixtures/device.ddsl")
         .env("GENERATED_FILE", "tests/fixtures/device.rs")
+        .env("RUST_DEFMT_FEATURE", rust_defmt_feature)
         .envs(overrides.iter().copied())
         .output()
         .expect("run action script with Bash");
@@ -188,7 +194,7 @@ fn composite_action_has_pinned_dependencies_and_expected_inputs() {
     let action = action();
     let inputs = &action.inputs;
     assert_eq!(action.runs.using, "composite");
-    assert_eq!(inputs.len(), 4);
+    assert_eq!(inputs.len(), 5);
     assert_eq!(inputs["source"].required, Some(true));
     assert_eq!(
         inputs["generated-file"].default.as_ref().and_then(Value::as_str),
@@ -201,6 +207,11 @@ fn composite_action_has_pinned_dependencies_and_expected_inputs() {
     assert_eq!(
         inputs["rust-toolchain"].default.as_ref().and_then(Value::as_str),
         Some("1.94.0")
+    );
+    assert_ne!(inputs["rust-defmt-feature"].required, Some(true));
+    assert_eq!(
+        inputs["rust-defmt-feature"].default.as_ref().and_then(Value::as_str),
+        Some("")
     );
 
     for step in action.runs.steps.iter().filter(|step| step.uses.is_some()) {
@@ -278,6 +289,7 @@ fn composite_action_configures_its_steps_without_checkout() {
         .expect("generation and comparison step");
     assert_eq!(check.env["SOURCE_FILE"], "${{ inputs.source }}");
     assert_eq!(check.env["GENERATED_FILE"], "${{ inputs.generated-file }}");
+    assert_eq!(check.env["RUST_DEFMT_FEATURE"], "${{ inputs.rust-defmt-feature }}");
 }
 
 #[test]
@@ -324,6 +336,48 @@ fn matching_ddsl_and_generated_rust_pass_without_changing_the_baseline() {
             .unwrap()
             .contains('\r')
     );
+}
+
+#[test]
+fn defmt_generation_matches_the_requested_feature_and_requires_opt_in() {
+    for feature in ["defmt", "custom-defmt"] {
+        let fixture = copy_fixture();
+        let overrides = [("RUST_DEFMT_FEATURE", feature)];
+        let generation = run_script(
+            concat!(
+                "set -euo pipefail\n",
+                "ddc build --source tests/fixtures/device.ddsl --output ci_gen.rs rust ",
+                "--rust-defmt-feature=\"$RUST_DEFMT_FEATURE\"\n",
+                "rustfmt --edition 2024 --config newline_style=Unix ci_gen.rs\n",
+            ),
+            &fixture.workspace,
+            &overrides,
+        );
+        assert!(generation.status.success(), "{}", generation.output);
+        let generated_file = fixture.workspace.join("ci_gen.rs");
+        let contents = fs::read_to_string(&generated_file).unwrap();
+        assert!(
+            contents.contains(&format!("#[cfg(feature = \"{feature}\")]")),
+            "{contents}"
+        );
+        assert!(contents.contains("impl defmt::Format"), "{contents}");
+        fs::rename(generated_file, fixture.workspace.join("tests/fixtures/device.rs")).unwrap();
+
+        let result = run_check(&fixture.workspace, &overrides);
+        assert!(result.status.success(), "{feature:?}\n{}", result.output);
+
+        let result = run_check(&fixture.workspace, &[]);
+        assert_eq!(result.status.code(), Some(1), "{feature:?}\n{}", result.output);
+        assert!(result.output.contains("@@"), "{}", result.output);
+    }
+}
+
+#[test]
+fn defmt_generation_rejects_a_baseline_without_defmt() {
+    let fixture = copy_fixture();
+    let result = run_check(&fixture.workspace, &[("RUST_DEFMT_FEATURE", "defmt")]);
+    assert_eq!(result.status.code(), Some(1), "{}", result.output);
+    assert!(result.output.contains("@@"), "{}", result.output);
 }
 
 #[test]
