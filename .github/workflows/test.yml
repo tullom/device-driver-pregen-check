@@ -56,10 +56,35 @@ jobs:
     name: Test composite action
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: '1.94.0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Install Rust and rustfmt
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: '1.94.0'
+          components: rustfmt
+      - name: Install compatible device-driver v2 compiler
+        uses: baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0
+        with:
+          crate: device-driver-cli
+          version: '^2.1.1'
+          locked: true
+          cache-key: rust-1.94.0
+      - name: Generate smoke-test baseline
+        id: prepare-fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd -- "$GITHUB_WORKSPACE"
+          temp_file="$(mktemp --tmpdir="$GITHUB_WORKSPACE" --suffix=.rs '.device-driver-pregen.XXXXXXXX')"
+          trap 'rm -f -- "$temp_file"' EXIT
+          ddc build --source tests/fixtures/device.ddsl --output "$temp_file" rust
+          rustfmt --edition 2024 --config newline_style=Unix "$temp_file"
+          mv -- "$temp_file" tests/fixtures/device.rs
       - uses: ./
         with:
           source: tests/fixtures/device.ddsl

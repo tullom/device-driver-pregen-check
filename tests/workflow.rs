@@ -83,6 +83,11 @@ fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> Run
         .and_then(Value::as_str)
         .unwrap();
     let cli_version = inputs["cli-version"].default.as_ref().and_then(Value::as_str).unwrap();
+    let rust_defmt_feature = inputs["rust-defmt-feature"]
+        .default
+        .as_ref()
+        .and_then(Value::as_str)
+        .unwrap();
     let mut paths = vec![repository_root().join(".tools/bin")];
     if let Some(inherited_path) = env::var_os("PATH") {
         paths.extend(env::split_paths(&inherited_path));
@@ -97,6 +102,7 @@ fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> Run
         .env("GITHUB_WORKSPACE", workspace.to_string_lossy().replace('\\', "/"))
         .env("SOURCE_FILE", "tests/fixtures/device.ddsl")
         .env("GENERATED_FILE", "tests/fixtures/device.rs")
+        .env("RUST_DEFMT_FEATURE", rust_defmt_feature)
         .envs(overrides.iter().copied())
         .output()
         .expect("run action script with Bash");
@@ -188,7 +194,7 @@ fn composite_action_has_pinned_dependencies_and_expected_inputs() {
     let action = action();
     let inputs = &action.inputs;
     assert_eq!(action.runs.using, "composite");
-    assert_eq!(inputs.len(), 4);
+    assert_eq!(inputs.len(), 5);
     assert_eq!(inputs["source"].required, Some(true));
     assert_eq!(
         inputs["generated-file"].default.as_ref().and_then(Value::as_str),
@@ -196,11 +202,16 @@ fn composite_action_has_pinned_dependencies_and_expected_inputs() {
     );
     assert_eq!(
         inputs["cli-version"].default.as_ref().and_then(Value::as_str),
-        Some("2.1.0")
+        Some("2.1.1")
     );
     assert_eq!(
         inputs["rust-toolchain"].default.as_ref().and_then(Value::as_str),
         Some("1.94.0")
+    );
+    assert_ne!(inputs["rust-defmt-feature"].required, Some(true));
+    assert_eq!(
+        inputs["rust-defmt-feature"].default.as_ref().and_then(Value::as_str),
+        Some("")
     );
 
     for step in action.runs.steps.iter().filter(|step| step.uses.is_some()) {
@@ -278,6 +289,84 @@ fn composite_action_configures_its_steps_without_checkout() {
         .expect("generation and comparison step");
     assert_eq!(check.env["SOURCE_FILE"], "${{ inputs.source }}");
     assert_eq!(check.env["GENERATED_FILE"], "${{ inputs.generated-file }}");
+    assert_eq!(check.env["RUST_DEFMT_FEATURE"], "${{ inputs.rust-defmt-feature }}");
+}
+
+#[test]
+fn composite_smoke_test_regenerates_its_baseline_with_matching_tooling() {
+    let contents = fs::read_to_string(repository_root().join(".github/workflows/test.yml")).unwrap();
+    let workflow: Value = serde_yml::from_str(&contents).expect("parse test workflow");
+    let job = &workflow["jobs"]["composite"];
+    let steps: Vec<Step> = serde_yml::from_value(job["steps"].clone()).expect("parse composite test steps");
+    let inputs = &action().inputs;
+    let toolchain = inputs["rust-toolchain"]
+        .default
+        .as_ref()
+        .and_then(Value::as_str)
+        .unwrap();
+    assert_eq!(job["env"]["RUSTUP_TOOLCHAIN"].as_str(), Some(toolchain));
+
+    let rust_setup = steps
+        .iter()
+        .find(|step| {
+            step.uses
+                .as_deref()
+                .is_some_and(|uses| uses.starts_with("dtolnay/rust-toolchain@"))
+        })
+        .expect("smoke-test Rust and rustfmt install step");
+    assert_eq!(rust_setup.with["toolchain"].as_str(), Some(toolchain));
+    assert_eq!(rust_setup.with["components"].as_str(), Some("rustfmt"));
+
+    let install = steps
+        .iter()
+        .find(|step| step.with.get("crate").and_then(Value::as_str) == Some("device-driver-cli"))
+        .expect("smoke-test compiler install step");
+    let cli_version = inputs["cli-version"].default.as_ref().and_then(Value::as_str).unwrap();
+    assert_eq!(
+        install.with["version"].as_str(),
+        Some(format!("^{cli_version}").as_str())
+    );
+    assert_eq!(install.with["locked"].as_bool(), Some(true));
+    assert_eq!(
+        install.with["cache-key"].as_str(),
+        Some(format!("rust-{toolchain}").as_str())
+    );
+
+    let prepare_index = steps
+        .iter()
+        .position(|step| step.id.as_deref() == Some("prepare-fixture"))
+        .expect("smoke-test baseline generation step");
+    let check_index = steps
+        .iter()
+        .position(|step| step.uses.as_deref() == Some("./"))
+        .expect("local composite action invocation");
+    assert!(
+        prepare_index < check_index,
+        "generate the baseline before running the action"
+    );
+    assert_eq!(
+        steps[check_index].with["source"].as_str(),
+        Some("tests/fixtures/device.ddsl")
+    );
+    assert_eq!(
+        steps[check_index].with["generated-file"].as_str(),
+        Some("tests/fixtures/device.rs")
+    );
+
+    let fixture = copy_fixture();
+    fs::write(
+        fixture.workspace.join("tests/fixtures/device.rs"),
+        "// Stale baseline\n",
+    )
+    .unwrap();
+    let preparation = run_script(
+        steps[prepare_index].run.as_deref().expect("baseline generation script"),
+        &fixture.workspace,
+        &[],
+    );
+    assert!(preparation.status.success(), "{}", preparation.output);
+    let result = run_check(&fixture.workspace, &[]);
+    assert!(result.status.success(), "{}", result.output);
 }
 
 #[test]
@@ -324,6 +413,48 @@ fn matching_ddsl_and_generated_rust_pass_without_changing_the_baseline() {
             .unwrap()
             .contains('\r')
     );
+}
+
+#[test]
+fn defmt_generation_matches_the_requested_feature_and_requires_opt_in() {
+    for feature in ["defmt", "custom-defmt"] {
+        let fixture = copy_fixture();
+        let overrides = [("RUST_DEFMT_FEATURE", feature)];
+        let generation = run_script(
+            concat!(
+                "set -euo pipefail\n",
+                "ddc build --source tests/fixtures/device.ddsl --output ci_gen.rs rust ",
+                "--rust-defmt-feature=\"$RUST_DEFMT_FEATURE\"\n",
+                "rustfmt --edition 2024 --config newline_style=Unix ci_gen.rs\n",
+            ),
+            &fixture.workspace,
+            &overrides,
+        );
+        assert!(generation.status.success(), "{}", generation.output);
+        let generated_file = fixture.workspace.join("ci_gen.rs");
+        let contents = fs::read_to_string(&generated_file).unwrap();
+        assert!(
+            contents.contains(&format!("#[cfg(feature = \"{feature}\")]")),
+            "{contents}"
+        );
+        assert!(contents.contains("impl defmt::Format"), "{contents}");
+        fs::rename(generated_file, fixture.workspace.join("tests/fixtures/device.rs")).unwrap();
+
+        let result = run_check(&fixture.workspace, &overrides);
+        assert!(result.status.success(), "{feature:?}\n{}", result.output);
+
+        let result = run_check(&fixture.workspace, &[]);
+        assert_eq!(result.status.code(), Some(1), "{feature:?}\n{}", result.output);
+        assert!(result.output.contains("@@"), "{}", result.output);
+    }
+}
+
+#[test]
+fn defmt_generation_rejects_a_baseline_without_defmt() {
+    let fixture = copy_fixture();
+    let result = run_check(&fixture.workspace, &[("RUST_DEFMT_FEATURE", "defmt")]);
+    assert_eq!(result.status.code(), Some(1), "{}", result.output);
+    assert!(result.output.contains("@@"), "{}", result.output);
 }
 
 #[test]

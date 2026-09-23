@@ -10,10 +10,13 @@ inputs:
     default: src/device.rs
   cli-version:
     description: Lowest acceptable device-driver-cli v2 release; the newest compatible 2.x is installed
-    default: '2.1.0'
+    default: '2.1.1'
   rust-toolchain:
     description: Exact stable Rust release to use, at least 1.94.0 and the selected CLI's MSRV
     default: '1.94.0'
+  rust-defmt-feature:
+    description: Cargo feature used to gate generated defmt implementations; leave empty to disable
+    default: ''
 
 runs:
   using: composite
@@ -68,6 +71,7 @@ runs:
         RUSTUP_TOOLCHAIN: ${{ inputs.rust-toolchain }}
         SOURCE_FILE: ${{ inputs.source }}
         GENERATED_FILE: ${{ inputs.generated-file }}
+        RUST_DEFMT_FEATURE: ${{ inputs.rust-defmt-feature }}
       run: |
         set -euo pipefail
         cd -- "$GITHUB_WORKSPACE"
@@ -98,9 +102,14 @@ runs:
         temp_file="$(mktemp --tmpdir="$repo_root" --suffix=.rs '.device-driver-pregen.XXXXXXXX')"
         trap 'rm -f -- "$temp_file"' EXIT
 
+        rust_args=()
+        if [[ -n "$RUST_DEFMT_FEATURE" ]]; then
+          rust_args+=("--rust-defmt-feature=$RUST_DEFMT_FEATURE")
+        fi
+
         ddc --version
         rustfmt --version
-        ddc build --source "$source_path" --output "$temp_file" rust
+        ddc build --source "$source_path" --output "$temp_file" rust "${rust_args[@]}"
         rustfmt --edition 2024 --config newline_style=Unix "$temp_file"
         diff -u -- "$generated_path" "$temp_file"
         echo 'Generated Rust matches the committed file.'
