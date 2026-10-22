@@ -43,6 +43,19 @@ Point `source` at your DDSL file and `generated-file` at the Rust file you
 commit. Everything else has a default. For immutable pinning, replace `@v1` with
 a full commit SHA.
 
+To use a specific compiler release, set `cli-version`:
+
+```yaml
+      - uses: tullom/device-driver-pregen-check@v1
+        with:
+          source: device.ddsl
+          generated-file: src/device.rs
+          cli-version: '2.1.0'
+```
+
+This installs exactly CLI 2.1.0, not a newer compatible release. Omit
+`cli-version` or leave it empty to use the newest compatible v2 release.
+
 To generate `defmt` implementations gated by a Cargo feature, set
 `rust-defmt-feature` to that feature's name:
 
@@ -72,19 +85,26 @@ passes or fails.
 | --- | --- | --- | --- |
 | `source` | yes | — | Your DDSL file, relative to the repository root |
 | `generated-file` | no | `src/device.rs` | The committed Rust file to check |
-| `cli-version` | no | `2.1.1` | Oldest `device-driver-cli` v2 release you accept |
-| `rust-toolchain` | no | `1.94.0` | Exact Rust release to use |
+| `cli-version` | no | `''` | Exact `device-driver-cli` v2 release; empty selects the newest compatible release |
+| `rust-toolchain` | no | `1.95.0` | Exact Rust release to use |
 | `rust-defmt-feature` | no | `''` | Cargo feature gating generated `defmt` implementations; empty disables them |
 
 **Paths** are relative to your repository root and use forward slashes. Spaces
 are fine. Absolute paths, backslashes, directories, and anything outside the
 checkout are rejected.
 
-**`cli-version` is a floor, not a pin.** The default installs the newest
-[`device-driver-cli`](https://crates.io/crates/device-driver-cli) in
-`>=2.1.1, <3.0.0`. Ranges, prereleases, and `latest` are rejected, so raise the
-floor with an exact release like `2.3.1`. `rust-toolchain` must be an exact
-stable release, at least 1.94.0 and new enough for the CLI.
+**`cli-version` is an exact pin when set.** Use a stable
+[`device-driver-cli`](https://crates.io/crates/device-driver-cli) v2 release,
+at least `2.1.0`, such as `2.1.1`. Ranges, prereleases, and `latest` are rejected.
+Omitting the input or leaving it empty installs the newest release in
+`>=2.1.1, <3.0.0`. Earlier versions of this action treated an explicit
+`cli-version` as a minimum; it now selects only that release.
+`rust-toolchain` must be an exact stable release, at least 1.94.0 and new enough
+for the CLI.
+
+CLI 2.2.0 requires Rust 1.95 or newer. To stay on Rust 1.94.0, set both
+`rust-toolchain: '1.94.0'` and `cli-version: '2.1.1'`. Newer CLI releases can
+raise their minimum Rust version, so pin both inputs for reproducible checks.
 
 **Formatting** uses the `rustfmt.toml` at your repository root; config files in
 other directories are ignored. Edition 2024 and LF newlines are always forced.
@@ -117,8 +137,8 @@ Bash:
 
 ```bash
 set -euo pipefail
-rustup toolchain install 1.94.0 --profile minimal --component rustfmt
-export RUSTUP_TOOLCHAIN=1.94.0
+rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+export RUSTUP_TOOLCHAIN=1.95.0
 cargo install device-driver-cli --version '^2.1.1' --locked
 ddc build --source device.ddsl --output ci_gen.rs rust
 rustfmt --edition 2024 --config newline_style=Unix ci_gen.rs
@@ -128,9 +148,9 @@ mv -- ci_gen.rs src/device.rs
 PowerShell:
 
 ```powershell
-rustup toolchain install 1.94.0 --profile minimal --component rustfmt
+rustup toolchain install 1.95.0 --profile minimal --component rustfmt
 if ($LASTEXITCODE -ne 0) { throw 'Toolchain installation failed' }
-$env:RUSTUP_TOOLCHAIN = '1.94.0'
+$env:RUSTUP_TOOLCHAIN = '1.95.0'
 cargo install device-driver-cli --version '^2.1.1' --locked
 if ($LASTEXITCODE -ne 0) { throw 'CLI installation failed' }
 ddc build --source device.ddsl --output ci_gen.rs rust
@@ -141,6 +161,10 @@ Move-Item -LiteralPath ci_gen.rs -Destination src/device.rs -Force
 ```
 
 The crate is named `device-driver-cli`, but the executable is `ddc`.
+
+The commands above match the default version selection. If `cli-version` is
+set, replace `'^2.1.1'` with an exact requirement for that release, such as
+`'=2.1.0'`, in the `cargo install` command.
 
 When `rust-defmt-feature` is set, add the same feature after `rust` in either
 `ddc build` command above, for example `rust --rust-defmt-feature=defmt`.
@@ -155,9 +179,10 @@ the `.gitattributes` rule above, then run `git add --renormalize .`.
 | `source must be a repository-relative path with forward slashes.` | A leading `/`, a drive letter, or `\` in the path. |
 | `source does not exist.` | Not in the checkout. Check the path, or enable submodules. |
 | `generated-file must be a regular file inside the checkout.` | It's a directory, or it points outside the workspace. |
-| `cli-version must be a stable v2 release, such as 2.1.0.` | Ranges, prereleases, and `latest` aren't accepted. |
+| `cli-version must be an exact stable v2 release, such as 2.1.0.` | Ranges, prereleases, and `latest` aren't accepted. |
 | `rust-toolchain must be an exact stable release, such as 1.94.0.` | `stable` and `nightly` aren't accepted. |
-| No matching package while installing | `cli-version` is newer than any published v2 release. |
+| `requires rustc ... or newer` | Increase `rust-toolchain`, or pin a `cli-version` compatible with your Rust release. |
+| No matching package while installing | The exact `cli-version` requested hasn't been published. |
 
 ## Multiple devices
 
@@ -190,7 +215,8 @@ cargo install device-driver-cli --version '=2.1.0' --locked --root .tools
 cargo test --locked
 ```
 
-The test harness checks `.tools/bin` before `PATH`. The composite CI smoke test
-instead installs the action's newest-compatible CLI and regenerates its checkout
-copy of the fixture before invoking the action. This keeps generator-version
-headers aligned without weakening the exact diff check.
+The test harness checks `.tools/bin` before `PATH`. The composite CI smoke tests
+exercise both the newest-compatible default and an exact pin to CLI 2.1.0. Each
+regenerates its checkout copy of the fixture with the matching compiler before
+invoking the action. This keeps generator-version headers aligned without
+weakening the exact diff check.

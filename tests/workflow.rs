@@ -61,6 +61,7 @@ fn action() -> &'static Action {
 struct RunResult {
     status: ExitStatus,
     output: String,
+    github_output: String,
 }
 
 fn bash_path() -> OsString {
@@ -92,6 +93,7 @@ fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> Run
     if let Some(inherited_path) = env::var_os("PATH") {
         paths.extend(env::split_paths(&inherited_path));
     }
+    let github_output = tempfile::NamedTempFile::new().expect("create GitHub output file");
 
     let output = Command::new(bash_path())
         .args(["--noprofile", "--norc", "-c", script])
@@ -100,6 +102,10 @@ fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> Run
         .env("RUSTUP_TOOLCHAIN", rust_toolchain)
         .env("CLI_VERSION", cli_version)
         .env("GITHUB_WORKSPACE", workspace.to_string_lossy().replace('\\', "/"))
+        .env(
+            "GITHUB_OUTPUT",
+            github_output.path().to_string_lossy().replace('\\', "/"),
+        )
         .env("SOURCE_FILE", "tests/fixtures/device.ddsl")
         .env("GENERATED_FILE", "tests/fixtures/device.rs")
         .env("RUST_DEFMT_FEATURE", rust_defmt_feature)
@@ -114,6 +120,7 @@ fn run_script(script: &str, workspace: &Path, overrides: &[(&str, &str)]) -> Run
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ),
+        github_output: fs::read_to_string(github_output.path()).expect("read GitHub output file"),
     }
 }
 
@@ -200,13 +207,10 @@ fn composite_action_has_pinned_dependencies_and_expected_inputs() {
         inputs["generated-file"].default.as_ref().and_then(Value::as_str),
         Some("src/device.rs")
     );
-    assert_eq!(
-        inputs["cli-version"].default.as_ref().and_then(Value::as_str),
-        Some("2.1.1")
-    );
+    assert_eq!(inputs["cli-version"].default.as_ref().and_then(Value::as_str), Some(""));
     assert_eq!(
         inputs["rust-toolchain"].default.as_ref().and_then(Value::as_str),
-        Some("1.94.0")
+        Some("1.95.0")
     );
     assert_ne!(inputs["rust-defmt-feature"].required, Some(true));
     assert_eq!(
@@ -277,7 +281,10 @@ fn composite_action_configures_its_steps_without_checkout() {
         .find(|step| step.with.get("crate").and_then(Value::as_str) == Some("device-driver-cli"))
         .expect("device-driver-cli install step");
     assert_eq!(install.with["locked"].as_bool(), Some(true));
-    assert_eq!(install.with["version"].as_str(), Some("^${{ inputs.cli-version }}"));
+    assert_eq!(
+        install.with["version"].as_str(),
+        Some("${{ steps.validate.outputs.cli-version }}")
+    );
     assert_eq!(
         install.with["cache-key"].as_str(),
         Some("rust-${{ inputs.rust-toolchain }}")
@@ -293,7 +300,7 @@ fn composite_action_configures_its_steps_without_checkout() {
 }
 
 #[test]
-fn composite_smoke_test_regenerates_its_baseline_with_matching_tooling() {
+fn composite_smoke_test_covers_default_and_pinned_compilers_with_matching_tooling() {
     let contents = fs::read_to_string(repository_root().join(".github/workflows/test.yml")).unwrap();
     let workflow: Value = serde_yml::from_str(&contents).expect("parse test workflow");
     let job = &workflow["jobs"]["composite"];
@@ -305,6 +312,16 @@ fn composite_smoke_test_regenerates_its_baseline_with_matching_tooling() {
         .and_then(Value::as_str)
         .unwrap();
     assert_eq!(job["env"]["RUSTUP_TOOLCHAIN"].as_str(), Some(toolchain));
+    let matrix = job["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .expect("smoke-test compiler version matrix");
+    let cli_version = inputs["cli-version"].default.as_ref().and_then(Value::as_str).unwrap();
+    let cases = [(cli_version, "^2.1.1"), ("2.1.0", "=2.1.0")];
+    assert_eq!(matrix.len(), cases.len());
+    for (entry, (cli_version, install_version)) in matrix.iter().zip(cases) {
+        assert_eq!(entry["cli-version"].as_str(), Some(cli_version));
+        assert_eq!(entry["install-version"].as_str(), Some(install_version));
+    }
 
     let rust_setup = steps
         .iter()
@@ -321,11 +338,7 @@ fn composite_smoke_test_regenerates_its_baseline_with_matching_tooling() {
         .iter()
         .find(|step| step.with.get("crate").and_then(Value::as_str) == Some("device-driver-cli"))
         .expect("smoke-test compiler install step");
-    let cli_version = inputs["cli-version"].default.as_ref().and_then(Value::as_str).unwrap();
-    assert_eq!(
-        install.with["version"].as_str(),
-        Some(format!("^{cli_version}").as_str())
-    );
+    assert_eq!(install.with["version"].as_str(), Some("${{ matrix.install-version }}"));
     assert_eq!(install.with["locked"].as_bool(), Some(true));
     assert_eq!(
         install.with["cache-key"].as_str(),
@@ -352,6 +365,10 @@ fn composite_smoke_test_regenerates_its_baseline_with_matching_tooling() {
         steps[check_index].with["generated-file"].as_str(),
         Some("tests/fixtures/device.rs")
     );
+    assert_eq!(
+        steps[check_index].with["cli-version"].as_str(),
+        Some("${{ matrix.cli-version }}")
+    );
 
     let fixture = copy_fixture();
     fs::write(
@@ -370,10 +387,11 @@ fn composite_smoke_test_regenerates_its_baseline_with_matching_tooling() {
 }
 
 #[test]
-fn supported_minimum_versions_pass_validation() {
+fn supported_versions_pass_validation() {
     let cases: &[&[(&str, &str)]] = &[
         &[],
         &[("CLI_VERSION", "2.1.1")],
+        &[("CLI_VERSION", "2.1.1"), ("RUSTUP_TOOLCHAIN", "1.94.0")],
         &[("CLI_VERSION", "2.12.3"), ("RUSTUP_TOOLCHAIN", "1.95.1")],
     ];
     for overrides in cases {
@@ -383,12 +401,37 @@ fn supported_minimum_versions_pass_validation() {
 }
 
 #[test]
+fn cli_version_is_exact_when_specified_and_latest_compatible_otherwise() {
+    let default = run_step("validate", &repository_root(), &[]);
+    assert!(default.status.success(), "{}", default.output);
+    assert_eq!(default.github_output, "cli-version=^2.1.1\n");
+
+    for (version, requirement) in [
+        ("", "^2.1.1"),
+        ("2.1.0", "=2.1.0"),
+        ("2.1.1", "=2.1.1"),
+        ("2.12.3", "=2.12.3"),
+    ] {
+        let result = run_step("validate", &repository_root(), &[("CLI_VERSION", version)]);
+        assert!(result.status.success(), "{version:?}\n{}", result.output);
+        assert_eq!(result.github_output, format!("cli-version={requirement}\n"));
+    }
+}
+
+#[test]
 fn unsupported_versions_fail_validation() {
     let cases: &[&[(&str, &str)]] = &[
         &[("CLI_VERSION", "1.0.9")],
         &[("CLI_VERSION", "2.0.99")],
+        &[("CLI_VERSION", "3.0.0")],
+        &[("CLI_VERSION", "latest")],
+        &[("CLI_VERSION", "2.1")],
+        &[("CLI_VERSION", "=2.1.0")],
         &[("CLI_VERSION", "^2.1.0")],
+        &[("CLI_VERSION", ">=2.1.0")],
         &[("CLI_VERSION", "2.1.0-rc.1")],
+        &[("CLI_VERSION", "2.01.0")],
+        &[("CLI_VERSION", "2.1.0 ")],
         &[("CLI_VERSION", "2.1.0; exit 0")],
         &[("RUSTUP_TOOLCHAIN", "stable")],
         &[("RUSTUP_TOOLCHAIN", "nightly")],
@@ -399,6 +442,7 @@ fn unsupported_versions_fail_validation() {
         let result = run_step("validate", &repository_root(), overrides);
         assert_eq!(result.status.code(), Some(1), "{overrides:?}\n{}", result.output);
         assert!(result.output.contains("::error::"), "{}", result.output);
+        assert!(result.github_output.is_empty(), "{}", result.github_output);
     }
 }
 

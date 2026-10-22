@@ -9,11 +9,11 @@ inputs:
     description: Path to the committed Rust file to compare against, relative to your repository root
     default: src/device.rs
   cli-version:
-    description: Lowest acceptable device-driver-cli v2 release; the newest compatible 2.x is installed
-    default: '2.1.1'
+    description: Exact device-driver-cli v2 release; leave empty for the newest compatible 2.x, at least 2.1.1
+    default: ''
   rust-toolchain:
     description: Exact stable Rust release to use, at least 1.94.0 and the selected CLI's MSRV
-    default: '1.94.0'
+    default: '1.95.0'
   rust-defmt-feature:
     description: Cargo feature used to gate generated defmt implementations; leave empty to disable
     default: ''
@@ -29,13 +29,17 @@ runs:
         CLI_VERSION: ${{ inputs.cli-version }}
       run: |
         set -euo pipefail
-        if [[ ! "$CLI_VERSION" =~ ^2\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-          echo '::error::cli-version must be a stable v2 release, such as 2.1.0.'
-          exit 1
-        fi
-        if (( BASH_REMATCH[1] < 1 )); then
-          echo '::error::cli-version must be at least 2.1.0.'
-          exit 1
+        cli_requirement='^2.1.1'
+        if [[ -n "$CLI_VERSION" ]]; then
+          if [[ ! "$CLI_VERSION" =~ ^2\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo '::error::cli-version must be an exact stable v2 release, such as 2.1.0.'
+            exit 1
+          fi
+          if (( BASH_REMATCH[1] < 1 )); then
+            echo '::error::cli-version must be at least 2.1.0.'
+            exit 1
+          fi
+          cli_requirement="=$CLI_VERSION"
         fi
         if [[ ! "$RUSTUP_TOOLCHAIN" =~ ^1\.([1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
           echo '::error::rust-toolchain must be an exact stable release, such as 1.94.0.'
@@ -45,6 +49,7 @@ runs:
           echo '::error::rust-toolchain must be at least 1.94.0.'
           exit 1
         fi
+        printf 'cli-version=%s\n' "$cli_requirement" >> "$GITHUB_OUTPUT"
 
     - name: Install Rust and rustfmt
       uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
@@ -54,11 +59,11 @@ runs:
       env:
         RUSTUP_TOOLCHAIN: ${{ inputs.rust-toolchain }}
 
-    - name: Install compatible device-driver v2 compiler
+    - name: Install device-driver v2 compiler
       uses: baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0
       with:
         crate: device-driver-cli
-        version: '^${{ inputs.cli-version }}'
+        version: ${{ steps.validate.outputs.cli-version }}
         locked: true
         cache-key: rust-${{ inputs.rust-toolchain }}
       env:
