@@ -52,7 +52,7 @@ runs:
         printf 'cli-version=%s\n' "$cli_requirement" >> "$GITHUB_OUTPUT"
 
     - name: Install Rust and rustfmt
-      uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
       with:
         toolchain: ${{ inputs.rust-toolchain }}
         components: rustfmt
